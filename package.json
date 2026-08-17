@@ -24,7 +24,8 @@
       "node_modules/ws/**/*"
     ],
     "win": {
-      "target": ["nsis", "portable"]
+      "icon": "build/icon.ico",
+      "target": ["portable"]
     },
     "nsis": {
       "oneClick": true,

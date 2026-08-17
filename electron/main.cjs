@@ -168,6 +168,7 @@ function createWindow() {
     show: true,
     backgroundColor: '#090c10',
     title: 'Ivorycord Voice & Chat',
+    icon: path.join(__dirname, '../build/icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
