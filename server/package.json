@@ -1,0 +1,21 @@
+{
+  "name": "ivorycord-signaling-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ultra-lightweight WebSocket signaling server for Ivorycord WebRTC Mesh",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
