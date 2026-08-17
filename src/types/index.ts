@@ -18,7 +18,11 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export type InputMode = 'vad' | 'ptt';
+
 export interface AudioSettings {
+  inputMode: InputMode; // 'vad' (Ses Aktivitesi) veya 'ptt' (Bas-Konuş)
+  pttKey: string; // Bas-konuş tuşu (örn: 'KeyV', 'Space', 'ControlLeft')
   inputDeviceId: string;
   outputDeviceId: string;
   vadThreshold: number; // dB cinsinden eşik
@@ -46,6 +50,13 @@ export interface PeerInfo {
   audioLevel: number; // 0 - 100
   connectionState: RTCPeerConnectionState;
   joinedAt: number;
+}
+
+export interface PublicRoomInfo {
+  id: string;
+  name: string;
+  memberCount: number;
+  isPermanent: boolean;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -127,6 +138,13 @@ export type SignalingMessage =
   | {
       type: 'chat-message';
       message: ChatMessage;
+    }
+  | {
+      type: 'get-rooms';
+    }
+  | {
+      type: 'rooms-list';
+      rooms: PublicRoomInfo[];
     }
   | {
       type: 'error';

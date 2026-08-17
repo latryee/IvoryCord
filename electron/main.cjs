@@ -9,7 +9,9 @@ let wss = null;
 const rooms = new Map();
 const clients = new Map();
 const roomChats = new Map(); // roomId -> ChatMessage[]
+const emptySince = new Map(); // roomId -> timestamp
 const permanentRooms = new Set(['ivory', 'Ivory']);
+const EMPTY_ROOM_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Kalıcı Ivory odasını başlat
 rooms.set('ivory', new Set());
@@ -36,6 +38,37 @@ function startEmbeddedSignalingServer(port = 4000) {
       }
     }
 
+    function getPublicRooms() {
+      const list = [];
+      const ivoryPeers = rooms.get('ivory');
+      list.push({
+        id: 'ivory',
+        name: 'Ivory Ana Salon',
+        memberCount: ivoryPeers ? ivoryPeers.size : 0,
+        isPermanent: true,
+      });
+
+      for (const [roomId, peers] of rooms.entries()) {
+        if (roomId.toLowerCase() === 'ivory') continue;
+        list.push({
+          id: roomId,
+          name: roomId,
+          memberCount: peers.size,
+          isPermanent: false,
+        });
+      }
+      return list;
+    }
+
+    function broadcastRoomsList() {
+      const msg = { type: 'rooms-list', rooms: getPublicRooms() };
+      for (const client of clients.values()) {
+        if (client.ws.readyState === WebSocket.OPEN) {
+          send(client.ws, msg);
+        }
+      }
+    }
+
     function broadcastToRoom(roomId, msg, excludePeerId) {
       const roomPeers = rooms.get(roomId);
       if (!roomPeers) return;
@@ -57,12 +90,29 @@ function startEmbeddedSignalingServer(port = 4000) {
         roomPeers.delete(peerId);
         broadcastToRoom(rId, { type: 'user-left', userId: peerId, username: client.user.username });
         if (roomPeers.size === 0 && !permanentRooms.has(rId)) {
-          rooms.delete(rId);
-          roomChats.delete(rId);
+          emptySince.set(rId, Date.now());
         }
       }
       client.roomId = null;
+      broadcastRoomsList();
     }
+
+    // 30 saniyede bir boş odaları temizle
+    setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+      for (const [rId, ts] of emptySince.entries()) {
+        if (now - ts >= EMPTY_ROOM_TIMEOUT_MS) {
+          if (!permanentRooms.has(rId)) {
+            rooms.delete(rId);
+            roomChats.delete(rId);
+            emptySince.delete(rId);
+            changed = true;
+          }
+        }
+      }
+      if (changed) broadcastRoomsList();
+    }, 30000);
 
     wss.on('connection', (ws) => {
       const peerId = randomUUID().substring(0, 8);
@@ -81,6 +131,8 @@ function startEmbeddedSignalingServer(port = 4000) {
       };
       clients.set(peerId, connection);
 
+      send(ws, { type: 'rooms-list', rooms: getPublicRooms() });
+
       ws.on('message', (data) => {
         try {
           const msg = JSON.parse(data.toString());
@@ -95,6 +147,8 @@ function startEmbeddedSignalingServer(port = 4000) {
               rooms.set(targetRoomId, new Set());
               roomChats.set(targetRoomId, []);
             }
+            emptySince.delete(targetRoomId);
+
             const roomPeers = rooms.get(targetRoomId);
             const chatHistory = roomChats.get(targetRoomId) || [];
 
@@ -107,6 +161,9 @@ function startEmbeddedSignalingServer(port = 4000) {
             send(ws, { type: 'room-joined', roomId: targetRoomId, selfId: peerId, peers: existingPeers, chatHistory });
             broadcastToRoom(targetRoomId, { type: 'user-joined', user: connection.user }, peerId);
             roomPeers.add(peerId);
+            broadcastRoomsList();
+          } else if (msg.type === 'get-rooms') {
+            send(ws, { type: 'rooms-list', rooms: getPublicRooms() });
           } else if (msg.type === 'signal-offer' || msg.type === 'signal-answer' || msg.type === 'signal-ice') {
             const target = clients.get(msg.targetPeerId);
             if (target) {
@@ -178,7 +235,6 @@ function createWindow() {
     },
   });
 
-  // Otomatik mikrofon izni ver
   session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
     if (permission === 'media') return true;
     return false;

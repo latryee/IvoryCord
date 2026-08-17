@@ -11,6 +11,7 @@ export function App() {
     saveSettings,
     localAudioLevel,
     availableDevices,
+    publicRooms,
     refreshDevices,
     joinRoom,
     leaveRoom,
@@ -60,6 +61,7 @@ export function App() {
             isConnecting={roomState.status === 'connecting'}
             errorMessage={roomState.errorMessage}
             settings={settings}
+            publicRooms={publicRooms}
             onOpenSettings={() => setIsLobbySettingsOpen(true)}
           />
           <SettingsModal

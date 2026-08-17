@@ -1,4 +1,4 @@
-import { SignalingMessage, UserMetadata, ChatMessage } from '../types/index.js';
+import { SignalingMessage, UserMetadata, ChatMessage, PublicRoomInfo } from '../types/index.js';
 
 export type SignalingEventMap = {
   'connected': () => void;
@@ -12,12 +12,13 @@ export type SignalingEventMap = {
   'signal-ice': (data: { senderPeerId: string; candidate: RTCIceCandidateInit }) => void;
   'user-state-update': (data: { userId: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean }) => void;
   'chat-message': (msg: ChatMessage) => void;
+  'rooms-list': (rooms: PublicRoomInfo[]) => void;
 };
 
 export class SignalingClient {
   private ws: WebSocket | null = null;
   private serverUrl: string;
-  private listeners: Map<keyof SignalingEventMap, Set<Function>> = new Map();
+  private listeners: Map<string, Set<Function>> = new Map();
   private reconnectTimer: number | null = null;
   private isExplicitlyClosed = false;
 
@@ -122,6 +123,10 @@ export class SignalingClient {
         this.emit('chat-message', message.message);
         break;
 
+      case 'rooms-list':
+        this.emit('rooms-list', message.rooms);
+        break;
+
       case 'error':
         this.emit('error', message.message);
         break;
@@ -134,6 +139,12 @@ export class SignalingClient {
       roomId,
       username,
       avatarColor,
+    });
+  }
+
+  public requestRoomsList(): void {
+    this.send({
+      type: 'get-rooms',
     });
   }
 
@@ -195,8 +206,9 @@ export class SignalingClient {
   }
 
   public off<K extends keyof SignalingEventMap>(event: K, fn: SignalingEventMap[K]): void {
-    if (this.listeners.has(event)) {
-      this.listeners.get(event)!.delete(fn);
+    const set = this.listeners.get(event);
+    if (set) {
+      set.delete(fn as any);
     }
   }
 

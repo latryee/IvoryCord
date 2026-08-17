@@ -20,6 +20,13 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface PublicRoomInfo {
+  id: string;
+  name: string;
+  memberCount: number;
+  isPermanent: boolean;
+}
+
 export interface ClientConnection {
   ws: WebSocket;
   user: UserMetadata;
@@ -84,6 +91,13 @@ export type SignalMessage =
   | {
       type: 'chat-message';
       message: ChatMessage;
+    }
+  | {
+      type: 'get-rooms';
+    }
+  | {
+      type: 'rooms-list';
+      rooms: PublicRoomInfo[];
     }
   | {
       type: 'error';

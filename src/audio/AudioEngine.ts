@@ -5,17 +5,19 @@ export type SpeakingChangeCallback = (isSpeaking: boolean) => void;
 
 export class AudioEngine {
   private audioContext: AudioContext | null = null;
-  private rawMediaStream: MediaStream | null = null; // Sürekli açık kalan VAD analiz akışı
-  private transmissionStream: MediaStream | null = null; // WebRTC'ye giden dinamik açılıp kapanan akış
+  private rawMediaStream: MediaStream | null = null; // Canlı mikrofon analiz akışı
+  private transmissionStream: MediaStream | null = null; // WebRTC'ye giden iletim akışı
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private analyserNode: AnalyserNode | null = null;
   private animationFrameId: number | null = null;
 
   // Ayarlar
   private settings: AudioSettings = {
+    inputMode: 'vad',
+    pttKey: 'KeyV',
     inputDeviceId: 'default',
     outputDeviceId: 'default',
-    vadThreshold: -48, // dB cinsinden eşik (Geniş mikrofon uyumluluğu için -48 dB)
+    vadThreshold: -48, // dB cinsinden eşik
     vadHoldTime: 300, // ms cinsinden bekleme süresi
     echoCancellation: true,
     noiseSuppression: true,
@@ -23,8 +25,9 @@ export class AudioEngine {
     highBitrateOpus: true,
   };
 
-  // VAD ve Susturma Durumları
+  // VAD ve PTT Durumları
   private isSpeaking = false;
+  private isPttPressed = false;
   private lastSpeakingTime = 0;
   private isManuallyMuted = false;
   private isDeafened = false;
@@ -40,12 +43,11 @@ export class AudioEngine {
   }
 
   /**
-   * Mikrofon Başlatma & VAD Ayrık İletim Grafiği Kurulumu
+   * Mikrofon Başlatma & Ayrık İletim Grafiği Kurulumu
    */
   public async initialize(): Promise<MediaStream> {
     this.cleanup();
 
-    // 1. AudioContext Oluştur ve Başlat
     const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     this.audioContext = new AudioCtx({
       sampleRate: 48000,
@@ -56,7 +58,6 @@ export class AudioEngine {
       await this.audioContext.resume();
     }
 
-    // 2. Esnek ve Donanım Uyumlu Mikrofon Kısıtlamaları
     const audioConstraints: MediaTrackConstraints = {
       echoCancellation: this.settings.echoCancellation,
       noiseSuppression: this.settings.noiseSuppression,
@@ -70,35 +71,27 @@ export class AudioEngine {
     }
 
     try {
-      // Mikrofon akışını al
       this.rawMediaStream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints,
         video: false,
       });
 
-      // WebRTC için iletim akışını klonla
       this.transmissionStream = this.rawMediaStream.clone();
-      
-      // Başlangıçta iletim akışını kapat (VAD konuşma tespit edene kadar)
       this.setTransmissionEnabled(false);
 
-      // Web Audio API Düğümleri (Ham akışa bağlanır, bu sayede VAD asla kesilmez!)
       this.sourceNode = this.audioContext.createMediaStreamSource(this.rawMediaStream);
       this.analyserNode = this.audioContext.createAnalyser();
       this.analyserNode.fftSize = 512;
       this.analyserNode.smoothingTimeConstant = 0.15;
 
       this.sourceNode.connect(this.analyserNode);
+      this.startAudioLoop();
 
-      // VAD analiz döngüsünü başlat
-      this.startVADLoop();
-
-      console.log('[AudioEngine] Mikrofon ve VAD motoru başarıyla başlatıldı.');
+      console.log('[AudioEngine] Ses motoru başarıyla başlatıldı. Mod:', this.settings.inputMode);
       return this.transmissionStream;
     } catch (error) {
       console.warn('[AudioEngine] İdeal ayarlarla başlatılamadı, temel ayarlara geçiliyor:', error);
       
-      // Fallback: En temel ayarlarla tekrar dene
       this.rawMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       this.transmissionStream = this.rawMediaStream.clone();
       this.setTransmissionEnabled(false);
@@ -107,7 +100,7 @@ export class AudioEngine {
         this.sourceNode = this.audioContext.createMediaStreamSource(this.rawMediaStream);
         this.analyserNode = this.audioContext.createAnalyser();
         this.sourceNode.connect(this.analyserNode);
-        this.startVADLoop();
+        this.startAudioLoop();
       }
 
       return this.transmissionStream;
@@ -115,9 +108,9 @@ export class AudioEngine {
   }
 
   /**
-   * Gerçek Zamanlı RMS & dBFS VAD Döngüsü
+   * Gerçek Zamanlı RMS & dBFS Analizi + VAD / PTT Karar Mekanizması
    */
-  private startVADLoop(): void {
+  private startAudioLoop(): void {
     if (!this.analyserNode) return;
 
     const bufferLength = this.analyserNode.fftSize;
@@ -126,7 +119,6 @@ export class AudioEngine {
     const checkAudioLevel = () => {
       if (!this.analyserNode) return;
 
-      // AudioContext askıdaysa uyandır
       if (this.audioContext && this.audioContext.state === 'suspended') {
         this.audioContext.resume().catch(() => {});
       }
@@ -141,7 +133,7 @@ export class AudioEngine {
       }
       const rms = Math.sqrt(sumOfSquares / bufferLength);
 
-      // 2. Desibel (dBFS) Dönüşümü
+      // 2. Desibel Dönüşümü
       let decibels = -100;
       if (rms > 0.00001) {
         decibels = 20 * Math.log10(rms);
@@ -149,29 +141,30 @@ export class AudioEngine {
       decibels = Math.max(-100, Math.min(0, decibels));
 
       // 3. Normalleştirilmiş Görsel VU Değeri (0 - 100)
-      // -65 dB (sessiz ortam) ile -12 dB (yüksek ses) aralığı
       const minDb = -65;
       const maxDb = -12;
       const normalizedLevel = Math.max(0, Math.min(100, ((decibels - minDb) / (maxDb - minDb)) * 100));
 
       const now = performance.now();
 
-      // 4. VAD Karar Mekanizması
+      // 4. Mod Kararı (VAD vs PTT)
       if (this.isManuallyMuted || this.isDeafened) {
         this.updateSpeakingState(false);
+      } else if (this.settings.inputMode === 'ptt') {
+        // Bas-Konuş Modu: Tuşa basılı mı?
+        this.updateSpeakingState(this.isPttPressed);
       } else {
+        // Ses Aktivitesi (VAD) Modu: Desibel eşiğini aştı mı?
         if (decibels >= this.settings.vadThreshold) {
           this.lastSpeakingTime = now;
           this.updateSpeakingState(true);
         } else {
-          // Hangover süresi (kelime sonları için gecikmeli kapatma)
           if (this.isSpeaking && now - this.lastSpeakingTime > this.settings.vadHoldTime) {
             this.updateSpeakingState(false);
           }
         }
       }
 
-      // UI ve VU-Meter callback'ini tetikle
       if (this.onLevelChange) {
         this.onLevelChange({
           decibels: Math.round(decibels),
@@ -187,8 +180,17 @@ export class AudioEngine {
   }
 
   /**
-   * Konuşma durumu değiştiğinde iletim kanalını aç/kapa
+   * Bas-Konuş (PTT) Tuş Durumu Değişikliği
    */
+  public setPttActive(pressed: boolean): void {
+    this.isPttPressed = pressed;
+    if (this.settings.inputMode === 'ptt') {
+      if (!this.isManuallyMuted && !this.isDeafened) {
+        this.updateSpeakingState(pressed);
+      }
+    }
+  }
+
   private updateSpeakingState(speaking: boolean): void {
     if (this.isSpeaking !== speaking) {
       this.isSpeaking = speaking;
@@ -302,5 +304,6 @@ export class AudioEngine {
     }
 
     this.isSpeaking = false;
+    this.isPttPressed = false;
   }
 }

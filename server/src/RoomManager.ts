@@ -1,19 +1,27 @@
 import { WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
-import { ClientConnection, SignalMessage, UserMetadata, ChatMessage } from './types.js';
+import { ClientConnection, SignalMessage, UserMetadata, ChatMessage, PublicRoomInfo } from './types.js';
+
+const EMPTY_ROOM_TIMEOUT_MS = 10 * 60 * 1000; // 10 Dakika Boş Kalma Süresi
 
 export class RoomManager {
   private rooms: Map<string, Set<string>> = new Map(); // roomId -> Set<peerId>
   private clients: Map<string, ClientConnection> = new Map(); // peerId -> ClientConnection
-  private roomChats: Map<string, ChatMessage[]> = new Map(); // roomId -> ChatMessage[] (Son 50 mesaj)
+  private roomChats: Map<string, ChatMessage[]> = new Map(); // roomId -> ChatMessage[]
+  private emptySince: Map<string, number> = new Map(); // roomId -> timestamp
 
-  // Kalıcı Odalar (Kullanıcı kalmasa dahi asla silinmeyen ana sunucular)
+  // Kalıcı Odalar (Asla kapanmayan ana salon)
   private permanentRooms: Set<string> = new Set(['ivory', 'Ivory']);
 
   constructor() {
     // Kalıcı "ivory" ana salonunu başlat
     this.rooms.set('ivory', new Set());
     this.roomChats.set('ivory', []);
+
+    // Her 30 saniyede bir 10 dakikadır boş olan odaları temizle
+    setInterval(() => {
+      this.cleanupExpiredEmptyRooms();
+    }, 30000);
   }
 
   public registerClient(ws: WebSocket, id: string): ClientConnection {
@@ -43,10 +51,8 @@ export class RoomManager {
     const client = this.clients.get(peerId);
     if (!client) return;
 
-    // Normalleştir
     const targetRoomId = roomId.toLowerCase() === 'ivory' ? 'ivory' : roomId;
 
-    // Önceki odadan çıkış yap
     if (client.roomId) {
       this.leaveRoom(peerId);
     }
@@ -60,10 +66,12 @@ export class RoomManager {
       this.roomChats.set(targetRoomId, []);
     }
 
+    // Odaya biri girdiği için boşluk sayacını kaldır
+    this.emptySince.delete(targetRoomId);
+
     const roomPeers = this.rooms.get(targetRoomId)!;
     const chatHistory = this.roomChats.get(targetRoomId) || [];
 
-    // Odadaki mevcut kullanıcıların listesini topla
     const existingPeers: UserMetadata[] = [];
     for (const otherPeerId of roomPeers) {
       const otherClient = this.clients.get(otherPeerId);
@@ -72,7 +80,6 @@ export class RoomManager {
       }
     }
 
-    // Yeni kullanıcıya mevcut odayı ve mesaj geçmişini bildir
     this.send(client.ws, {
       type: 'room-joined',
       roomId: targetRoomId,
@@ -81,7 +88,6 @@ export class RoomManager {
       chatHistory,
     });
 
-    // Odadaki diğer kullanıcılara yeni kullanıcının katıldığını bildir
     this.broadcastToRoom(
       targetRoomId,
       {
@@ -93,6 +99,8 @@ export class RoomManager {
 
     roomPeers.add(peerId);
     console.log(`[RoomManager] User '${client.user.username}' (${peerId}) joined room '${targetRoomId}'. Room size: ${roomPeers.size}`);
+
+    this.broadcastRoomsList();
   }
 
   public handleChatMessage(peerId: string, roomId: string, text?: string, imageUrl?: string): void {
@@ -117,16 +125,13 @@ export class RoomManager {
     const history = this.roomChats.get(roomId)!;
     history.push(chatMsg);
     if (history.length > 50) {
-      history.shift(); // En fazla son 50 mesajı hafızada tut
+      history.shift();
     }
 
-    // Odadaki herkese (gönderen dahil) mesajı ilet
     this.broadcastToRoom(roomId, {
       type: 'chat-message',
       message: chatMsg,
     });
-
-    console.log(`[RoomManager] [Chat in ${roomId}] ${client.user.username}: ${text || '[Görsel Gönderildi]'}`);
   }
 
   public leaveRoom(peerId: string): void {
@@ -144,21 +149,85 @@ export class RoomManager {
         username: client.user.username,
       });
 
-      // Kalıcı odaları asla silme!
+      // Eğer odada kimse kalmadıysa ve kalıcı oda değilse 10 dakikalık silme sayacını başlat
       if (roomPeers.size === 0 && !this.permanentRooms.has(roomId)) {
-        this.rooms.delete(roomId);
-        this.roomChats.delete(roomId);
-        console.log(`[RoomManager] Room '${roomId}' deleted (empty).`);
+        this.emptySince.set(roomId, Date.now());
+        console.log(`[RoomManager] Room '${roomId}' is now empty. Scheduled deletion in 10 minutes if no one joins.`);
       }
     }
 
     console.log(`[RoomManager] User '${client.user.username}' (${peerId}) left room '${roomId}'.`);
     client.roomId = null;
+    this.broadcastRoomsList();
   }
 
   public removeClient(peerId: string): void {
     this.leaveRoom(peerId);
     this.clients.delete(peerId);
+  }
+
+  /**
+   * 10 dakikadır tamamen boş olan geçici odaları sil
+   */
+  private cleanupExpiredEmptyRooms(): void {
+    const now = Date.now();
+    let changed = false;
+
+    for (const [roomId, timestamp] of this.emptySince.entries()) {
+      if (now - timestamp >= EMPTY_ROOM_TIMEOUT_MS) {
+        if (!this.permanentRooms.has(roomId)) {
+          this.rooms.delete(roomId);
+          this.roomChats.delete(roomId);
+          this.emptySince.delete(roomId);
+          changed = true;
+          console.log(`[RoomManager] Room '${roomId}' deleted after 10 minutes of inactivity.`);
+        }
+      }
+    }
+
+    if (changed) {
+      this.broadcastRoomsList();
+    }
+  }
+
+  public getPublicRooms(): PublicRoomInfo[] {
+    const list: PublicRoomInfo[] = [];
+
+    // 1. Önce Ivory Ana Salon
+    const ivoryPeers = this.rooms.get('ivory');
+    list.push({
+      id: 'ivory',
+      name: 'Ivory Ana Salon',
+      memberCount: ivoryPeers ? ivoryPeers.size : 0,
+      isPermanent: true,
+    });
+
+    // 2. Diğer aktif odalar
+    for (const [roomId, peers] of this.rooms.entries()) {
+      if (roomId.toLowerCase() === 'ivory') continue;
+      list.push({
+        id: roomId,
+        name: roomId,
+        memberCount: peers.size,
+        isPermanent: false,
+      });
+    }
+
+    return list;
+  }
+
+  public broadcastRoomsList(): void {
+    const rooms = this.getPublicRooms();
+    const message: SignalMessage = {
+      type: 'rooms-list',
+      rooms,
+    };
+
+    for (const client of this.clients.values()) {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        this.send(client.ws, message);
+      }
+    }
   }
 
   public updateUserState(
@@ -185,10 +254,7 @@ export class RoomManager {
     message: SignalMessage
   ): void {
     const targetClient = this.clients.get(targetPeerId);
-    if (!targetClient) {
-      return;
-    }
-
+    if (!targetClient) return;
     this.send(targetClient.ws, message);
   }
 

@@ -6,6 +6,7 @@ import {
   RoomState,
   AudioDevice,
   ChatMessage,
+  PublicRoomInfo,
 } from '../types/index.js';
 import { AudioEngine } from '../audio/AudioEngine.js';
 import { SignalingClient } from '../audio/SignalingClient.js';
@@ -19,6 +20,8 @@ import {
 
 const SETTINGS_STORAGE_KEY = 'ivorycord_audio_settings';
 const DEFAULT_SETTINGS: AudioSettings = {
+  inputMode: 'vad',
+  pttKey: 'KeyV',
   inputDeviceId: 'default',
   outputDeviceId: 'default',
   vadThreshold: -48, // dB
@@ -55,12 +58,15 @@ export function useVoiceChat() {
     serverUrl: 'wss://ivorycord-production.up.railway.app',
   });
 
-  // 3. Oda Sohbet Mesajları
+  // 3. Açık Odalar Listesi
+  const [publicRooms, setPublicRooms] = useState<PublicRoomInfo[]>([]);
+
+  // 4. Oda Sohbet Mesajları
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
   const isChatOpenRef = useRef<boolean>(false);
 
-  // 4. Canlı Ses Seviyeleri (60fps VU-Meter)
+  // 5. Canlı Ses Seviyeleri (60fps VU-Meter)
   const [localAudioLevel, setLocalAudioLevel] = useState<AudioLevelData>({
     decibels: -100,
     normalizedLevel: 0,
@@ -76,6 +82,7 @@ export function useVoiceChat() {
   const audioEngineRef = useRef<AudioEngine | null>(null);
   const signalingClientRef = useRef<SignalingClient | null>(null);
   const webrtcManagerRef = useRef<WebRTCManager | null>(null);
+  const lobbySignalingRef = useRef<SignalingClient | null>(null);
 
   // Ayarları localStorage'a kaydet
   const saveSettings = useCallback((newSettings: Partial<AudioSettings>) => {
@@ -110,9 +117,33 @@ export function useVoiceChat() {
     }
   }, []);
 
-  // 5. Odaya Katılma Fonksiyonu
+  // Lobi için Açık Odalar Dinleyicisi
+  const connectLobbyDiscovery = useCallback((serverUrl: string) => {
+    if (lobbySignalingRef.current) {
+      lobbySignalingRef.current.disconnect();
+    }
+
+    const lobbyClient = new SignalingClient(serverUrl);
+    lobbySignalingRef.current = lobbyClient;
+
+    lobbyClient.on('rooms-list', (rooms) => {
+      setPublicRooms(rooms);
+    });
+
+    lobbyClient.connect().then(() => {
+      lobbyClient.requestRoomsList();
+    }).catch(() => {});
+  }, []);
+
+  // 6. Odaya Katılma Fonksiyonu
   const joinRoom = useCallback(
     async (roomId: string, username: string, serverUrl?: string) => {
+      // Lobideki keşif istemcisini kapat
+      if (lobbySignalingRef.current) {
+        lobbySignalingRef.current.disconnect();
+        lobbySignalingRef.current = null;
+      }
+
       setRoomState((prev) => ({
         ...prev,
         status: 'connecting',
@@ -125,7 +156,6 @@ export function useVoiceChat() {
       localStorage.setItem('ivorycord_username', username);
 
       try {
-        // A. Ses Motorunu Başlat
         const audioEngine = new AudioEngine(settings);
         audioEngineRef.current = audioEngine;
 
@@ -143,12 +173,10 @@ export function useVoiceChat() {
         const localStream = await audioEngine.initialize();
         const audioCtx = audioEngine.getAudioContext();
 
-        // B. Sinyalleşme İstemcisini Başlat
         const targetServerUrl = serverUrl || roomState.serverUrl;
         const signalingClient = new SignalingClient(targetServerUrl);
         signalingClientRef.current = signalingClient;
 
-        // C. WebRTC Yöneticisini Başlat
         const webrtcManager = new WebRTCManager(signalingClient);
         webrtcManagerRef.current = webrtcManager;
 
@@ -157,7 +185,6 @@ export function useVoiceChat() {
         }
         webrtcManager.setLocalStream(localStream);
 
-        // Uzak peer ses seviyeleri dinleyicisi
         webrtcManager.setOnPeerAudioLevel((peerId, level, isSpeaking) => {
           setRoomState((prev) => ({
             ...prev,
@@ -167,7 +194,6 @@ export function useVoiceChat() {
           }));
         });
 
-        // Sinyalleşme Event'leri
         signalingClient.on('room-joined', async ({ roomId: joinedRoomId, selfId, peers, chatHistory }) => {
           console.log(`[useVoiceChat] Odaya girildi: ${joinedRoomId}, selfId: ${selfId}`);
           playJoinSound();
@@ -197,7 +223,6 @@ export function useVoiceChat() {
             peers: initialPeers,
           }));
 
-          // Odadaki mevcut herkese doğru WebRTC Offer başlat
           for (const peer of peers) {
             await webrtcManager.createPeerConnection(peer.id, true);
           }
@@ -257,13 +282,16 @@ export function useVoiceChat() {
           }));
         });
 
-        // Sohbet Mesajı Geldiğinde
         signalingClient.on('chat-message', (msg) => {
           setMessages((prev) => [...prev, msg]);
           playMessageSound();
           if (!isChatOpenRef.current) {
             setUnreadChatCount((prev) => prev + 1);
           }
+        });
+
+        signalingClient.on('rooms-list', (rooms) => {
+          setPublicRooms(rooms);
         });
 
         signalingClient.on('error', (err) => {
@@ -274,7 +302,6 @@ export function useVoiceChat() {
           }));
         });
 
-        // WebSocket sunucusuna bağlan ve odaya katıl
         await signalingClient.connect();
         signalingClient.joinRoom(roomId, username);
 
@@ -292,7 +319,7 @@ export function useVoiceChat() {
     [roomState.serverUrl, settings, refreshDevices]
   );
 
-  // 6. Odadan Ayrılma & Temizlik
+  // 7. Odadan Ayrılma & Temizlik
   const leaveRoom = useCallback(() => {
     playLeaveSound();
 
@@ -328,9 +355,12 @@ export function useVoiceChat() {
       normalizedLevel: 0,
       isSpeaking: false,
     });
-  }, []);
 
-  // 7. Mesaj / Görsel Gönder
+    // Lobideki açık odaları tekrar dinlemeye başla
+    connectLobbyDiscovery(roomState.serverUrl);
+  }, [connectLobbyDiscovery, roomState.serverUrl]);
+
+  // 8. Mesaj / Görsel Gönder
   const sendChatMessage = useCallback(
     (text?: string, imageUrl?: string) => {
       if (!signalingClientRef.current || !roomState.roomId) return;
@@ -340,7 +370,7 @@ export function useVoiceChat() {
     [roomState.roomId]
   );
 
-  // 8. Sohbet Okundu İşareti
+  // 9. Sohbet Okundu İşareti
   const markChatRead = useCallback((isOpen: boolean) => {
     isChatOpenRef.current = isOpen;
     if (isOpen) {
@@ -348,7 +378,7 @@ export function useVoiceChat() {
     }
   }, []);
 
-  // 9. Mikrofon Sustur / Aç
+  // 10. Mikrofon Sustur / Aç
   const toggleMute = useCallback(() => {
     if (!audioEngineRef.current) return;
     const nextMuted = !roomState.isMuted;
@@ -361,7 +391,7 @@ export function useVoiceChat() {
     }
   }, [roomState.isMuted]);
 
-  // 10. Sağırlaş (Deafen) / Aç
+  // 11. Sağırlaş (Deafen) / Aç
   const toggleDeafen = useCallback(() => {
     const nextDeafened = !roomState.isDeafened;
     
@@ -386,7 +416,7 @@ export function useVoiceChat() {
     }
   }, [roomState.isDeafened, roomState.isMuted]);
 
-  // 11. Bireysel Uzak Kullanıcı Sesini Değiştir
+  // 12. Bireysel Uzak Kullanıcı Sesini Değiştir
   const setPeerVolume = useCallback((peerId: string, volume: number) => {
     if (webrtcManagerRef.current) {
       webrtcManagerRef.current.setPeerVolume(peerId, volume);
@@ -397,8 +427,54 @@ export function useVoiceChat() {
     }));
   }, []);
 
+  // 13. Global Bas-Konuş (PTT) Tuş Dinleyicisi
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (settings.inputMode !== 'ptt') return;
+      if (
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'SELECT' ||
+        document.activeElement?.tagName === 'TEXTAREA'
+      ) {
+        return;
+      }
+
+      if (e.code === settings.pttKey || e.key === settings.pttKey) {
+        if (!e.repeat && audioEngineRef.current) {
+          audioEngineRef.current.setPttActive(true);
+        }
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (settings.inputMode !== 'ptt') return;
+      if (
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'SELECT' ||
+        document.activeElement?.tagName === 'TEXTAREA'
+      ) {
+        return;
+      }
+
+      if (e.code === settings.pttKey || e.key === settings.pttKey) {
+        if (audioEngineRef.current) {
+          audioEngineRef.current.setPttActive(false);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [settings.inputMode, settings.pttKey]);
+
   useEffect(() => {
     refreshDevices();
+    connectLobbyDiscovery(roomState.serverUrl);
     return () => {
       leaveRoom();
     };
@@ -410,6 +486,7 @@ export function useVoiceChat() {
     saveSettings,
     localAudioLevel,
     availableDevices,
+    publicRooms,
     refreshDevices,
     joinRoom,
     leaveRoom,

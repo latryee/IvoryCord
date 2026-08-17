@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT) || 4000;
 const wss = new WebSocketServer({
   port: PORT,
   host: '0.0.0.0',
-  maxPayload: 10 * 1024 * 1024, // 10MB (Görsel ve ekran görüntüleri için yüksek kapasite)
+  maxPayload: 10 * 1024 * 1024,
 });
 const roomManager = new RoomManager();
 
@@ -15,7 +15,7 @@ console.log(`\n======================================================`);
 console.log(`  🚀 IVORYCORD ULTRA-LIGHT SIGNALING & CHAT SERVER    `);
 console.log(`  🔊 Port: ${PORT}`);
 console.log(`  🏰 Permanent Room: 'ivory'`);
-console.log(`  🖼️ Image Sharing: Enabled (10MB payload)`);
+console.log(`  ⏳ Empty Room Timeout: 10 Minutes`);
 console.log(`======================================================\n`);
 
 wss.on('connection', (ws: WebSocket) => {
@@ -23,6 +23,12 @@ wss.on('connection', (ws: WebSocket) => {
   const client = roomManager.registerClient(ws, peerId);
 
   console.log(`[WS] Client connected: ${peerId}`);
+
+  // Bağlanan istemciye anında mevcut açık odaların listesini gönder
+  roomManager.send(ws, {
+    type: 'rooms-list',
+    rooms: roomManager.getPublicRooms(),
+  });
 
   // Heartbeat ping-pong
   ws.on('pong', () => {
@@ -41,6 +47,14 @@ wss.on('connection', (ws: WebSocket) => {
             message.username,
             message.avatarColor
           );
+          break;
+        }
+
+        case 'get-rooms': {
+          roomManager.send(ws, {
+            type: 'rooms-list',
+            rooms: roomManager.getPublicRooms(),
+          });
           break;
         }
 
@@ -110,7 +124,7 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-// 30 saniyede bir ölü bağlantıları temizle (Heartbeat check)
+// 30 saniyede bir ölü bağlantıları temizle
 const heartbeatInterval = setInterval(() => {
   for (const client of roomManager.getAllClients()) {
     if (!client.isAlive) {
