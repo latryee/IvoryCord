@@ -35,7 +35,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   const [username, setUsername] = useState(
     localStorage.getItem('ivorycord_username') || `Oyuncu_${Math.floor(100 + Math.random() * 900)}`
   );
-  const [serverUrl, setServerUrl] = useState('ws://localhost:4000');
+  const [serverUrl, setServerUrl] = useState('wss://ivorycord-production.up.railway.app');
   const [showAdvancedServer, setShowAdvancedServer] = useState(false);
 
   // Lobi için Canlı Mikrofon Önizleme

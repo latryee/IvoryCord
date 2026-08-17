@@ -21,7 +21,7 @@ export class SignalingClient {
   private reconnectTimer: number | null = null;
   private isExplicitlyClosed = false;
 
-  constructor(serverUrl = 'ws://localhost:4000') {
+  constructor(serverUrl = 'wss://ivorycord-production.up.railway.app') {
     this.serverUrl = serverUrl;
   }
 

@@ -52,7 +52,7 @@ export function useVoiceChat() {
     isSpeaking: false,
     peers: [],
     errorMessage: null,
-    serverUrl: 'ws://localhost:4000',
+    serverUrl: 'wss://ivorycord-production.up.railway.app',
   });
 
   // 3. Oda Sohbet Mesajları
