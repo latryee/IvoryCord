@@ -5,9 +5,12 @@ node_modules/
 
 # Production & Build outputs
 dist/
-build/
 release/
 server/dist/
+*.exe
+*.lnk
+*.bat
+src-tauri/
 
 # Logs & temp
 *.log
