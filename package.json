@@ -1,7 +1,7 @@
 {
   "name": "ivorycord",
-  "private": true,
   "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
